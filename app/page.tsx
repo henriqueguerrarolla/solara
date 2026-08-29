@@ -75,9 +75,9 @@ export default function Home() {
         </div>
       </div>
 
-      {perfil?.nome && (
+      {perfil && (
         <div style={styles.greeting}>
-          Bem-vindo, {perfil.nome}!
+          Bem-vindo, {perfil.nome || 'Henrique'}!
         </div>
       )}
 
