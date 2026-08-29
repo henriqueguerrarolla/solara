@@ -98,8 +98,8 @@ export default function MenuAreas({ areas, isAdmin }: MenuAreasProps) {
       </div>
 
       {isAdmin && (
-        <Link href="/admin" style={{ textDecoration: 'none' }}>
-          <a style={styles.adminLink}>⚙️ Administração</a>
+        <Link href="/admin" style={styles.adminLink as any}>
+          ⚙️ Administração
         </Link>
       )}
     </div>
