@@ -14,7 +14,7 @@ Classifique o tipo da mensagem:
 
 Para cada item pedido, registre a descrição do jeito que o cliente escreveu. Não corrija nem traduza para código de produto; isso é trabalho do Pesquisador.
 
-Responda somente com JSON, sem texto antes ou depois, neste formato:
+Responda APENAS com um JSON válido, sem nenhum texto antes ou depois. Use este formato exato:
 {
   "tipo": "orcamento",
   "itens": [{"descricao_cliente": "parafusos sextavados 3/8", "quantidade": 200, "unidade": "un"}],
@@ -24,6 +24,8 @@ Responda somente com JSON, sem texto antes ou depois, neste formato:
   "urgencia": "normal",
   "observacoes": "pergunta preço para o volume"
 }
+
+IMPORTANTE: Responda com APENAS o JSON, nada mais. Nem um ponto, nem um caractere extra.
 
 Regras:
 - quantidade é número. Se o cliente disse "umas 50", use 50. Se não disse, use null.

@@ -1,4 +1,4 @@
-# SPEC — Solara OS
+envie# SPEC — Solara OS
 
 **O que o construtor precisa saber.** Este documento é lido pelo Claude Code. Cada seção é construída quando a instrução da aula pedir. Os nomes de seção são referenciados nas instruções: Fundação, Casca, Motor, Vendas, Financeiro.
 

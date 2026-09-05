@@ -8,13 +8,12 @@ import FilaAprovacao from '@/components/FilaAprovacao'
 import LinhaDoTempo from '@/components/LinhaDoTempo'
 
 interface Pedido {
-  id: string
   cod_pedido: string
   cod_cliente: string
   canal: string
   mensagem: string
   status: string
-  criado_em: string
+  data?: string
   clientes?: { nome: string }
 }
 
@@ -78,11 +77,14 @@ export default function VendasPage() {
         // Carrega pedidos
         const { data: pedidosData } = await supabase
           .from('pedidos_orcamento')
-          .select('*, clientes(nome)')
-          .order('criado_em', { ascending: false })
+          .select('*')
+          .order('data', { ascending: false })
 
         if (pedidosData) {
+          console.log('📦 Pedidos carregados:', pedidosData.length, pedidosData)
           setPedidos(pedidosData)
+        } else {
+          console.log('⚠️  Nenhum pedido encontrado')
         }
 
         setLoading(false)
@@ -94,7 +96,7 @@ export default function VendasPage() {
 
     checkAuth()
 
-    // Realtime
+    // Realtime subscription
     const supabase = createBrowserSupabaseClient()
     const channel = supabase
       .channel('pedidos_vendas')
@@ -102,19 +104,37 @@ export default function VendasPage() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'pedidos_orcamento' },
         (payload) => {
+          const novo = payload.new as Pedido
+          const antigo = payload.old as Record<string, any>
+          console.log('📡 Realtime update:', payload.eventType, novo?.cod_pedido)
           if (payload.eventType === 'INSERT') {
-            setPedidos((prev) => [payload.new as Pedido, ...prev])
+            setPedidos((prev) => [novo, ...prev])
           } else if (payload.eventType === 'UPDATE') {
             setPedidos((prev) =>
-              prev.map((p) => (p.id === payload.new.id ? (payload.new as Pedido) : p))
+              prev.map((p) => (p.cod_pedido === novo.cod_pedido ? novo : p))
             )
+          } else if (payload.eventType === 'DELETE') {
+            setPedidos((prev) => prev.filter((p) => p.cod_pedido !== antigo.cod_pedido))
           }
         }
       )
       .subscribe()
 
+    // Polling a cada 5 segundos como fallback
+    const pollInterval = setInterval(async () => {
+      const { data: pedidosData } = await supabase
+        .from('pedidos_orcamento')
+        .select('*')
+        .order('data', { ascending: false })
+
+      if (pedidosData) {
+        setPedidos(pedidosData)
+      }
+    }, 5000)
+
     return () => {
       channel.unsubscribe()
+      clearInterval(pollInterval)
     }
   }, [router])
 
@@ -184,7 +204,7 @@ export default function VendasPage() {
     return <div style={styles.container}>Carregando...</div>
   }
 
-  const selectedPedidoData = pedidos.find((p) => p.id === selectedPedido)
+  const selectedPedidoData = pedidos.find((p) => p.cod_pedido === selectedPedido)
 
   return (
     <div style={styles.page}>
@@ -235,9 +255,11 @@ export default function VendasPage() {
               + Novo Pedido
             </button>
 
-            <div style={styles.kanban}>
+            <div style={{...styles.kanban, position: 'relative'}}>
+              {pedidos.length === 0 && <div style={{padding: '20px', color: '#999'}}>Carregando pedidos...</div>}
               {STATUSES.map((status) => {
                 const pedidosStatus = pedidos.filter((p) => p.status === status)
+                console.log(`Status ${status}: ${pedidosStatus.length} pedidos`)
                 return (
                   <div key={status} style={styles.column}>
                     <div style={styles.columnTitle}>
@@ -246,20 +268,20 @@ export default function VendasPage() {
                     <div style={styles.cards}>
                       {pedidosStatus.map((pedido) => (
                         <div
-                          key={pedido.id}
+                          key={pedido.cod_pedido}
                           onClick={() => {
-                            setSelectedPedido(pedido.id)
+                            setSelectedPedido(pedido.cod_pedido)
                             setShowTimeline(true)
                           }}
                           style={{
                             ...styles.card,
                             backgroundColor:
-                              selectedPedido === pedido.id ? '#dbeafe' : 'white',
+                              selectedPedido === pedido.cod_pedido ? '#dbeafe' : 'white',
                           }}
                         >
                           <div style={styles.cardCod}>{pedido.cod_pedido}</div>
                           <div style={styles.cardCliente}>
-                            {pedido.clientes?.nome || pedido.cod_cliente}
+                            {clientes.find(c => c.cod_cliente === pedido.cod_cliente)?.nome || pedido.cod_cliente}
                           </div>
                           <div style={styles.cardDesc}>
                             {pedido.canal} · {pedido.mensagem.substring(0, 50)}...

@@ -1,19 +1,26 @@
-import { createClient } from '@/lib/supabase'
+import { createAdminClient } from '@/lib/supabase-admin'
 import { agente } from '@/lib/agente'
 
 export async function orquestradorVendas(cod_pedido: string) {
-  const supabase = await createClient()
+  const supabase = createAdminClient()
 
   // 1. Busca pedido
   const { data: pedido, error: pedidoError } = await supabase
     .from('pedidos_orcamento')
-    .select('*, clientes(cod_cliente, nome, segmento)')
+    .select('*')
     .eq('cod_pedido', cod_pedido)
     .single()
 
   if (pedidoError || !pedido) {
     throw new Error(`Pedido não encontrado: ${cod_pedido}`)
   }
+
+  // 2. Busca dados do cliente
+  const { data: cliente } = await supabase
+    .from('clientes')
+    .select('cod_cliente, nome, segmento, prazo_pagamento_dias, desconto_maximo_pct, cliente_desde')
+    .eq('cod_cliente', pedido.cod_cliente)
+    .single()
 
   // Atualiza status para processando
   await supabase
@@ -43,18 +50,18 @@ export async function orquestradorVendas(cod_pedido: string) {
   const orquestrador_id = execOrquestrador.id
 
   try {
-    // 2. Chama Triador
+    // 3. Chama Triador
     const entradaTriador = {
       mensagem: pedido.mensagem,
       canal: pedido.canal,
       cliente: {
         cod_cliente: pedido.cod_cliente,
-        nome: pedido.clientes?.nome,
-        segmento: pedido.clientes?.segmento,
+        nome: cliente?.nome,
+        segmento: cliente?.segmento,
       },
     }
 
-    const { saida: saidaTriador, execucao_id: triador_id } = await agente(
+    const { saida: saidaTriador } = await agente(
       'triador',
       entradaTriador,
       {
@@ -65,7 +72,7 @@ export async function orquestradorVendas(cod_pedido: string) {
       }
     )
 
-    // Se não for orçamento ou complemento, cria aprovação e finaliza
+    // Se não for orçamento nem complemento, cria aprovação e encerra
     if (!['orcamento', 'complemento'].includes(saidaTriador?.tipo)) {
       await supabase.from('aprovacoes').insert({
         area: 'vendas',
@@ -89,55 +96,130 @@ export async function orquestradorVendas(cod_pedido: string) {
       return
     }
 
-    // 3. Pesquisador (faria buscas no banco, por enquanto stubado)
-    const contextoPesquisador = {
-      itens: saidaTriador.itens || [],
-      condicao_pagamento_dias: 30,
-      desconto_maximo_pct: 5,
-      observacoes: '',
+    // 4. Pesquisador - consultas paralelas ao banco
+    const [produtosData, pedidosAnterioresData] = await Promise.all([
+      // Busca produtos similares para cada item
+      supabase
+        .from('produtos')
+        .select('cod_produto, descricao, unidade, preco_unitario, preco_acima_100_un, estoque, prazo_reposicao_dias'),
+      // Busca pedidos anteriores do cliente nos últimos 30 dias
+      supabase
+        .from('pedidos_orcamento')
+        .select('cod_pedido, data, mensagem, status')
+        .eq('cod_cliente', pedido.cod_cliente)
+        .gte('data', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString())
+        .order('data', { ascending: false }),
+    ])
+
+    // Monta candidatos por item (busca simples por descrição)
+    const candidatos_catalogo: any[] = []
+    if (saidaTriador.itens) {
+      for (const item of saidaTriador.itens) {
+        const palavras = item.descricao_cliente.toLowerCase().split(/\s+/)
+        const matches = produtosData.data?.filter((p: any) => {
+          const desc = p.descricao.toLowerCase()
+          return palavras.some((palavra: string) => desc.includes(palavra))
+        }) || []
+        candidatos_catalogo.push({
+          item: item.descricao_cliente,
+          candidatos: matches.slice(0, 5), // Top 5
+        })
+      }
     }
 
-    // 4. Redator
-    const entradaRedator = {
-      triagem: saidaTriador,
-      contexto: contextoPesquisador,
-      cliente: pedido.clientes,
-    }
-
-    const { saida: saidaRedator } = await agente('redator', entradaRedator, {
-      area: 'vendas',
-      item_tipo: 'pedido',
-      item_id: cod_pedido,
-      chamado_por: orquestrador_id,
-    })
-
-    // 5. Revisor
-    const entradaRevisor = {
-      resposta: saidaRedator?.resposta,
-      contexto: contextoPesquisador,
-      regras: {
-        prazoMinimo: 5,
-        descontoMaximo: 10,
+    const entradaPesquisador = {
+      itens_pedidos: saidaTriador.itens || [],
+      candidatos_catalogo,
+      cliente: {
+        cod_cliente: cliente?.cod_cliente,
+        nome: cliente?.nome,
+        segmento: cliente?.segmento,
+        prazo_pagamento_dias: cliente?.prazo_pagamento_dias || 30,
+        desconto_maximo_pct: cliente?.desconto_maximo_pct || 0,
+        cliente_desde: cliente?.cliente_desde,
       },
+      pedidos_anteriores: pedidosAnterioresData.data || [],
     }
 
-    const { saida: saidaRevisor } = await agente('revisor', entradaRevisor, {
-      area: 'vendas',
-      item_tipo: 'pedido',
-      item_id: cod_pedido,
-      chamado_por: orquestrador_id,
-    })
+    const { saida: saidaPesquisador } = await agente(
+      'pesquisador',
+      entradaPesquisador,
+      {
+        area: 'vendas',
+        item_tipo: 'pedido',
+        item_id: cod_pedido,
+        chamado_por: orquestrador_id,
+      }
+    )
 
-    // 6. Cria item em aprovacoes
+    const contexto = saidaPesquisador
+
+    // 5. Loop Redator/Revisor (máximo 2 voltas)
+    let saidaRedator: any
+    let saidaRevisor: any
+    let volta = 0
+    const maxVoltas = 2
+
+    do {
+      volta++
+
+      // 5a. Chama Redator
+      const entradaRedator = {
+        triagem: saidaTriador,
+        contexto,
+        cliente: { nome: cliente?.nome, segmento: cliente?.segmento },
+        ...(volta > 1 ? { ajustes: saidaRevisor.motivos } : {}),
+      }
+
+      saidaRedator = await agente(
+        'redator',
+        entradaRedator,
+        {
+          area: 'vendas',
+          item_tipo: 'pedido',
+          item_id: cod_pedido,
+          chamado_por: orquestrador_id,
+        }
+      ).then((r) => r.saida)
+
+      // 5b. Chama Revisor
+      const entradaRevisor = {
+        resposta: saidaRedator.resposta,
+        contexto,
+        regras: {
+          prazoMinimo: 5,
+          descontoMaximo: contexto.desconto_maximo_pct,
+        },
+      }
+
+      saidaRevisor = await agente(
+        'revisor',
+        entradaRevisor,
+        {
+          area: 'vendas',
+          item_tipo: 'pedido',
+          item_id: cod_pedido,
+          chamado_por: orquestrador_id,
+        }
+      ).then((r) => r.saida)
+
+      // Se aprovado ou atingiu máximo de voltas, sai do loop
+      if (saidaRevisor.aprovado || volta >= maxVoltas) {
+        break
+      }
+    } while (volta < maxVoltas)
+
+    // 6. Cria item em aprovações
     await supabase.from('aprovacoes').insert({
       area: 'vendas',
       item_tipo: 'pedido',
       item_id: cod_pedido,
-      titulo: `${pedido.clientes?.nome} · ${saidaRedator?.resumo || 'Orçamento'}`,
+      titulo: `${cliente?.nome} · ${saidaRedator.resumo || 'Orçamento'}`,
       proposta: {
-        resposta: saidaRedator?.resposta,
+        resposta: saidaRedator.resposta,
+        resumo: saidaRedator.resumo,
         triagem: saidaTriador,
-        contexto: contextoPesquisador,
+        contexto,
         revisao: saidaRevisor,
       },
       status: 'pendente',

@@ -1,5 +1,5 @@
 import { Anthropic } from '@anthropic-ai/sdk'
-import { createClient } from './supabase'
+import { createAdminClient } from './supabase-admin'
 
 interface Contexto {
   area: string
@@ -18,7 +18,7 @@ export async function agente(
   entrada: any,
   contexto: Contexto
 ): Promise<RespostaAgente> {
-  const supabase = await createClient()
+  const supabase = createAdminClient()
 
   // 1. Insere linha em execucoes_agentes com status = rodando
   const { data: execucao, error: insertError } = await supabase
@@ -74,8 +74,17 @@ export async function agente(
     })
 
     // Extrai o texto da resposta
-    const texto =
+    let texto =
       response.content[0].type === 'text' ? response.content[0].text : ''
+
+    // Remove espaços em branco do início e fim
+    texto = texto.trim()
+
+    // Se o texto contiver markdown code blocks, extrai o JSON
+    const jsonMatch = texto.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
+    if (jsonMatch) {
+      texto = jsonMatch[1].trim()
+    }
 
     // 4. Faz JSON.parse do texto retornado
     let saida: any
