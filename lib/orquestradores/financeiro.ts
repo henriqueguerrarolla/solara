@@ -1,5 +1,8 @@
 import { createAdminClient } from '@/lib/supabase-admin'
 import { agente } from '@/lib/agente'
+import { mapComConcorrenciaLimitada, comRetryRateLimit } from '@/lib/concorrencia'
+
+const LIMITE_INVESTIGADORES_SIMULTANEOS = 4
 
 export async function orquestradorFinanceiro(extrato_id: string) {
   const supabase = createAdminClient()
@@ -66,9 +69,13 @@ export async function orquestradorFinanceiro(extrato_id: string) {
 
     const lancamentoMap = new Map((lancamentos || []).map((l) => [l.id, l]))
 
-    // 2. Chama Investigador para cada divergência (em paralelo)
-    const investigacoes = await Promise.all(
-      divergencias.map((div) => {
+    // 2. Chama Investigador para cada divergência, em paralelo mas com
+    // concorrência limitada (evita estourar o rate limit da API quando há
+    // muitas divergências) e retry automático em caso de 429
+    const investigacoes = await mapComConcorrenciaLimitada(
+      divergencias,
+      LIMITE_INVESTIGADORES_SIMULTANEOS,
+      (div) => {
         const lancamento = div.lancamento_id ? lancamentoMap.get(div.lancamento_id) : null
 
         // Candidatos: títulos do mesmo cliente identificável pela descrição,
@@ -107,34 +114,36 @@ export async function orquestradorFinanceiro(extrato_id: string) {
             status: t.status,
           }))
 
-        return agente(
-          'investigador',
-          {
-            divergencia: {
-              tipo_inicial: div.tipo_inicial,
-              valor_lancamento: div.valor_lancamento,
-              valor_titulo: div.valor_titulo,
+        return comRetryRateLimit(() =>
+          agente(
+            'investigador',
+            {
+              divergencia: {
+                tipo_inicial: div.tipo_inicial,
+                valor_lancamento: div.valor_lancamento,
+                valor_titulo: div.valor_titulo,
+              },
+              lancamento: lancamento
+                ? {
+                    data: lancamento.data,
+                    descricao: lancamento.descricao,
+                    valor: lancamento.valor,
+                  }
+                : null,
+              titulos_candidatos: titulosCandidatos,
             },
-            lancamento: lancamento
-              ? {
-                  data: lancamento.data,
-                  descricao: lancamento.descricao,
-                  valor: lancamento.valor,
-                }
-              : null,
-            titulos_candidatos: titulosCandidatos,
-          },
-          {
-            area: 'financeiro',
-            item_tipo: 'divergencia',
-            item_id: div.id,
-            chamado_por: orquestrador_id,
-          }
+            {
+              area: 'financeiro',
+              item_tipo: 'divergencia',
+              item_id: div.id,
+              chamado_por: orquestrador_id,
+            }
+          )
         ).catch((err) => {
           console.error(`Erro ao investigar divergência ${div.id}:`, err)
           return null
         })
-      })
+      }
     )
 
     const hipotesesValidas = investigacoes
@@ -196,15 +205,17 @@ export async function orquestradorFinanceiro(extrato_id: string) {
         ...(tentativa > 1 ? { ajustes: saidaRevisor?.motivos } : {}),
       }
 
-      const resultConsolidador = await agente(
-        'consolidador',
-        entradaConsolidador,
-        {
-          area: 'financeiro',
-          item_tipo: 'divergencia',
-          item_id: extrato_id,
-          chamado_por: orquestrador_id,
-        }
+      const resultConsolidador = await comRetryRateLimit(() =>
+        agente(
+          'consolidador',
+          entradaConsolidador,
+          {
+            area: 'financeiro',
+            item_tipo: 'divergencia',
+            item_id: extrato_id,
+            chamado_por: orquestrador_id,
+          }
+        )
       ).catch((err) => {
         console.error('Erro ao consolidar:', err)
         return { saida: null }
@@ -213,22 +224,24 @@ export async function orquestradorFinanceiro(extrato_id: string) {
       saidaConsolidador = resultConsolidador.saida
 
       // 4. Revisor
-      const resultRevisor = await agente(
-        'revisor',
-        {
-          hipoteses: hipotesesValidas,
-          titulos_abertos: titulosAbertosParaRevisor,
-          relatorio: {
-            relatorio_markdown: saidaConsolidador?.relatorio_markdown,
-            acoes: saidaConsolidador?.acoes,
+      const resultRevisor = await comRetryRateLimit(() =>
+        agente(
+          'revisor',
+          {
+            hipoteses: hipotesesValidas,
+            titulos_abertos: titulosAbertosParaRevisor,
+            relatorio: {
+              relatorio_markdown: saidaConsolidador?.relatorio_markdown,
+              acoes: saidaConsolidador?.acoes,
+            },
           },
-        },
-        {
-          area: 'financeiro',
-          item_tipo: 'divergencia',
-          item_id: extrato_id,
-          chamado_por: orquestrador_id,
-        }
+          {
+            area: 'financeiro',
+            item_tipo: 'divergencia',
+            item_id: extrato_id,
+            chamado_por: orquestrador_id,
+          }
+        )
       ).catch((err) => {
         console.error('Erro ao revisar:', err)
         return { saida: { aprovado: true, motivos: [] } }

@@ -17,7 +17,7 @@ Total a cobrar, total a devolver, total aguardando confirmação.
 ## Observação
 Uma frase, se houver algo que a diretoria precisa saber (ex.: mesmo cliente com dois problemas no mês).
 
-Responda somente com JSON:
+Responda APENAS com um JSON válido, sem nenhum texto antes ou depois, neste formato exato:
 {
   "relatorio_markdown": "texto completo em markdown",
   "acoes": ["Cobrar R$ 350,00 da Metalúrgica Andrade (saldo de T0001)", "..."]
@@ -25,5 +25,11 @@ Responda somente com JSON:
 
 Regras:
 - Some os valores a partir das hipóteses recebidas. Não estime.
-- Não repita a explicação inteira de cada Investigador; uma linha por divergência.
+- Não repita a explicação inteira de cada Investigador; uma linha curta por divergência (até 20 palavras), sem repetir números já ditos na mesma linha.
 - Onde a confiança do Investigador for menor que 0.7, escreva "a confirmar" na linha.
+- Você tem um limite rígido de tokens de saída. Se houver mais de 20 divergências, agrupe as de mesmo tipo e ação (ex.: "12 depósitos sem NF, total R$ X, a confirmar com os clientes") em vez de uma linha por divergência. Nunca deixe o JSON incompleto: prefira um relatório mais curto a um relatório cortado no meio.
+
+IMPORTANTE sobre o formato JSON:
+- O campo "relatorio_markdown" é uma STRING JSON de uma linha só. Toda quebra de linha do markdown deve virar o caractere de escape \n dentro da string — nunca uma quebra de linha real.
+- Escape aspas duplas dentro do texto como \". Não use markdown code fences (```) em nenhum lugar da resposta.
+- Responda com APENAS o JSON, nada mais, nem um caractere fora dele.

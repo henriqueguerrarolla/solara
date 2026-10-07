@@ -71,6 +71,20 @@ export default function FinanceiroPage() {
         }
 
         setUser(session.user)
+
+        // Busca o extrato mais recente para restaurar o estado da tela
+        // (extratoId é estado local e some ao recarregar a página)
+        const { data: ultimoExtrato } = await supabase
+          .from('extratos_importados')
+          .select('id')
+          .order('importado_em', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (ultimoExtrato) {
+          setExtratoId(ultimoExtrato.id)
+        }
+
         setLoading(false)
       } catch (err) {
         console.error(err)
@@ -88,13 +102,23 @@ export default function FinanceiroPage() {
     const supabase = createBrowserSupabaseClient()
 
     const loadDados = async () => {
-      const [{ data: lancData }, { data: divData }] = await Promise.all([
+      const [{ data: lancData }, { data: divData }, { data: orqData }] = await Promise.all([
         supabase.from('lancamentos').select('*').eq('extrato_id', extratoId),
         supabase.from('divergencias').select('*').eq('extrato_id', extratoId),
+        supabase
+          .from('execucoes_agentes')
+          .select('*')
+          .eq('item_id', extratoId)
+          .eq('agente', 'orquestrador')
+          .eq('status', 'ok')
+          .order('fim', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
       ])
 
       if (lancData) setLancamentos(lancData)
       if (divData) setDivergencias(divData)
+      if (orqData?.saida?.relatorio) setRelatorio(orqData.saida.relatorio)
     }
 
     loadDados()

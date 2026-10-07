@@ -13,6 +13,71 @@ interface RespostaAgente {
   execucao_id: string
 }
 
+// Modelos às vezes geram strings JSON com quebras de linha reais (não escapadas
+// como \n) dentro de campos de texto longos (ex.: relatorio_markdown). Isso
+// quebra JSON.parse. Esta função varre o texto caractere a caractere e escapa
+// quebras de linha/tab que estejam dentro de uma string JSON, preservando o
+// resto da estrutura intacta.
+function repararQuebrasDeLinhaEmStrings(texto: string): string {
+  let resultado = ''
+  let dentroDeString = false
+  let anteriorEhBarra = false
+
+  for (let i = 0; i < texto.length; i++) {
+    const char = texto[i]
+
+    if (dentroDeString) {
+      if (char === '\\' && !anteriorEhBarra) {
+        anteriorEhBarra = true
+        resultado += char
+        continue
+      }
+
+      if (char === '"' && !anteriorEhBarra) {
+        dentroDeString = false
+        resultado += char
+        anteriorEhBarra = false
+        continue
+      }
+
+      if (char === '\n') {
+        resultado += '\\n'
+        anteriorEhBarra = false
+        continue
+      }
+
+      if (char === '\r') {
+        anteriorEhBarra = false
+        continue
+      }
+
+      if (char === '\t') {
+        resultado += '\\t'
+        anteriorEhBarra = false
+        continue
+      }
+
+      anteriorEhBarra = false
+      resultado += char
+    } else {
+      if (char === '"') {
+        dentroDeString = true
+      }
+      resultado += char
+    }
+  }
+
+  return resultado
+}
+
+function parseJSONTolerante(texto: string): any {
+  try {
+    return JSON.parse(texto)
+  } catch {
+    return JSON.parse(repararQuebrasDeLinhaEmStrings(texto))
+  }
+}
+
 export async function agente(
   papel: string,
   entrada: any,
@@ -61,9 +126,19 @@ export async function agente(
       apiKey: process.env.ANTHROPIC_API_KEY,
     })
 
+    // Consolidador (relatório de texto longo) e Revisor do Financeiro (pode
+    // conferir dezenas de hipóteses) precisam de mais espaço de saída do que
+    // os demais agentes, que respondem só um JSON curto.
+    const maxTokens =
+      papel === 'consolidador'
+        ? 8192
+        : papel === 'revisor' && contexto.area === 'financeiro'
+        ? 4096
+        : 2000
+
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 2000,
+      max_tokens: maxTokens,
       system: systemPrompt,
       messages: [
         {
@@ -86,10 +161,11 @@ export async function agente(
       texto = jsonMatch[1].trim()
     }
 
-    // 4. Faz JSON.parse do texto retornado
+    // 4. Faz JSON.parse do texto retornado (com reparo de quebras de linha
+    // literais dentro de strings, caso o parse direto falhe)
     let saida: any
     try {
-      saida = JSON.parse(texto)
+      saida = parseJSONTolerante(texto)
     } catch (parseError) {
       // Se falhar, marca erro e lança exceção
       await supabase
